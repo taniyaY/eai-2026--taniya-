@@ -1,0 +1,40 @@
+name: PA3 Tests
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - "pa3/**"
+      - ".github/workflows/pa3-tests.yml"
+  workflow_dispatch:
+
+jobs:
+  test-pa3:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install test dependencies
+        run: npm --prefix pa3/tests ci
+
+      - name: Start services
+        run: docker compose -f pa3/docker-compose.yml up -d --build --wait
+
+      - name: Run public tests
+        run: npm --prefix pa3/tests test
+
+      - name: Show logs on failure
+        if: failure()
+        run: docker compose -f pa3/docker-compose.yml logs --no-color
+
+      - name: Stop services
+        if: always()
+        run: docker compose -f pa3/docker-compose.yml down -v

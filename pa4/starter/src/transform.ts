@@ -280,7 +280,12 @@ export function parseMobileAddress(addr: string): Address {
     throw new Error("Mobile address must contain street, city, postal code, and country");
   }
 
-  const [street, city, postalCode, country] = parts;
+  const [street, city, postalCode, country] = parts as [
+    string,
+    string,
+    string,
+    string,
+  ];
   return { street, city, postalCode, country };
 }
 

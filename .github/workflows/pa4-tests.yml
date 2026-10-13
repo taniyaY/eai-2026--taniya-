@@ -1,0 +1,34 @@
+name: PA4 Tests
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - "pa4/**"
+      - "canonical/**"
+      - ".github/workflows/pa4-tests.yml"
+  workflow_dispatch:
+
+jobs:
+  test-pa4:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Install dependencies
+        run: npm --prefix pa4/starter ci
+      - name: Start pricing service
+        run: docker compose -f pa4/docker-compose.yml up -d --build --wait
+      - name: Typecheck
+        run: npm --prefix pa4/starter run typecheck
+      - name: Run public tests
+        run: npm --prefix pa4/starter test
+      - name: Show logs on failure
+        if: failure()
+        run: docker compose -f pa4/docker-compose.yml logs --no-color
+      - name: Stop services
+        if: always()
+        run: docker compose -f pa4/docker-compose.yml down -v

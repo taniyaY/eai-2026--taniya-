@@ -1,0 +1,274 @@
+openapi: 3.0.3
+info:
+  title: PA6 Checkout Orchestration API
+  version: 1.0.0
+  description: >-
+    Contract for submitting a canonical order to the checkout orchestrator.
+    The API coordinates payment, inventory, shipping and notification in a
+    sequential saga and returns the final outcome with an execution trace.
+servers:
+  - url: http://localhost:3000
+    description: Local Docker Compose orchestrator
+paths:
+  /health:
+    get:
+      operationId: getHealth
+      summary: Check orchestrator health
+      description: Returns a small status response when the orchestrator is ready to accept checkout requests.
+      responses:
+        '200':
+          description: The orchestrator is healthy and listening.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+  /checkout:
+    post:
+      operationId: createCheckout
+      summary: Execute an order checkout saga
+      description: >-
+        Accepts one canonical order and executes payment authorization,
+        inventory reservation, shipping creation and customer notification
+        strictly in that order. Completed payment and inventory actions are
+        compensated in reverse order if a later action fails.
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          description: >-
+            Client-generated key identifying this checkout attempt. Repeating
+            the same key and payload replays the stored result; reusing it with
+            a different payload is rejected.
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 200
+      requestBody:
+        required: true
+        description: Canonical order from the shared PA4 order model. The items array is limited to 50 entries by this API.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CanonicalOrder'
+      responses:
+        '200':
+          description: All four downstream steps completed successfully.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CheckoutResponse'
+        '400':
+          description: The idempotency header is missing or the request body is not a valid bounded canonical order.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: The idempotency key is already in flight or was previously used with a different request body.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: A downstream business operation failed, or a compensation action failed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CheckoutResponse'
+        '504':
+          description: A downstream operation exceeded the configured request timeout.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CheckoutResponse'
+components:
+  schemas:
+    HealthResponse:
+      type: object
+      description: Readiness response from the checkout orchestrator.
+      required: [status]
+      properties:
+        status:
+          type: string
+          description: Health state of the orchestrator.
+          enum: [ok]
+    Address:
+      type: object
+      description: Postal address belonging to the customer.
+      additionalProperties: false
+      required: [street, city, postalCode, country]
+      properties:
+        street:
+          type: string
+          description: Street and house number.
+          minLength: 1
+        city:
+          type: string
+          description: City or locality.
+          minLength: 1
+        postalCode:
+          type: string
+          description: Postal or ZIP code.
+          minLength: 1
+        country:
+          type: string
+          description: ISO 3166-1 alpha-2 country code.
+          minLength: 2
+          maxLength: 2
+    Customer:
+      type: object
+      description: Customer details carried by the canonical order.
+      additionalProperties: false
+      required: [name, email, address]
+      properties:
+        name:
+          type: string
+          description: Customer's display name.
+          minLength: 1
+        email:
+          type: string
+          description: Customer email address used as the notification recipient.
+          format: email
+        address:
+          $ref: '#/components/schemas/Address'
+    OrderItem:
+      type: object
+      description: One priced product line in the canonical order.
+      additionalProperties: false
+      required: [productId, productName, quantity, unitPrice, currency, taxRate]
+      properties:
+        productId:
+          type: string
+          description: Normalized product identifier.
+          pattern: '^PROD-[0-9]+$'
+        productName:
+          type: string
+          description: Product name shown on the order.
+          minLength: 1
+        quantity:
+          type: integer
+          description: Number of units ordered.
+          minimum: 1
+        unitPrice:
+          type: string
+          description: Unit price as a decimal string with exactly two fraction digits.
+          pattern: '^-?[0-9]+\.[0-9]{2}$'
+        currency:
+          type: string
+          description: Currency in which this line's unit price is denominated.
+          minLength: 1
+        taxRate:
+          type: number
+          description: Tax rate represented as a fraction between zero and one.
+          minimum: 0
+          maximum: 1
+    CanonicalOrder:
+      type: object
+      description: >-
+        The shared canonical order shape. No payment amount or recipient is
+        added to this body; the orchestrator derives those values from items
+        and customer.email.
+      additionalProperties: false
+      required: [orderId, orderType, source, receivedAt, orderDate, customer, items, currency, status]
+      properties:
+        orderId:
+          type: string
+          description: Original order identifier assigned by the source.
+          minLength: 1
+        orderType:
+          type: string
+          description: Business classification of the order.
+          enum: [standard, express, b2b]
+        source:
+          type: string
+          description: Source translator that produced the canonical order.
+          enum: [web, mobile, b2b]
+        receivedAt:
+          type: string
+          description: Timestamp when the canonical translator produced the record.
+          format: date-time
+        orderDate:
+          type: string
+          description: Original order timestamp normalized to ISO 8601 UTC.
+          format: date-time
+        customer:
+          $ref: '#/components/schemas/Customer'
+        items:
+          type: array
+          description: Bounded product lines used to calculate the payment amount and reserve stock.
+          minItems: 1
+          maxItems: 50
+          items:
+            $ref: '#/components/schemas/OrderItem'
+        currency:
+          type: string
+          description: Currency declared for the overall order.
+          minLength: 1
+        status:
+          type: string
+          description: Canonical order status at the time of checkout.
+          enum: [new, processing, shipped, delivered]
+    TraceItem:
+      type: object
+      description: One downstream action or compensation recorded in actual execution order.
+      additionalProperties: false
+      required: [step, status, startedAt, finishedAt, durationMs]
+      properties:
+        step:
+          type: string
+          description: Name of the forward or compensating saga step.
+          enum: [payment, inventory, shipping, notification, inventory_release, payment_refund]
+        status:
+          type: string
+          description: Outcome recorded for this call.
+          enum: [success, failed, timeout]
+        startedAt:
+          type: string
+          description: ISO 8601 timestamp at which the call began.
+          format: date-time
+        finishedAt:
+          type: string
+          description: ISO 8601 timestamp at which the call ended.
+          format: date-time
+        durationMs:
+          type: integer
+          description: Elapsed wall-clock duration of the call in milliseconds.
+          minimum: 0
+    CheckoutResponse:
+      type: object
+      description: Final result of a checkout saga, including its ordered execution trace.
+      additionalProperties: false
+      required: [orderId, status, trace]
+      properties:
+        orderId:
+          type: string
+          description: Order identifier from the canonical request.
+          minLength: 1
+        status:
+          type: string
+          description: Final state of the saga.
+          enum: [completed, failed, compensated]
+        code:
+          type: string
+          description: Machine-readable reason when the saga does not complete successfully.
+          minLength: 1
+        trace:
+          type: array
+          description: Calls executed by the saga in real chronological order, including compensation calls.
+          maxItems: 6
+          items:
+            $ref: '#/components/schemas/TraceItem'
+    ErrorResponse:
+      type: object
+      description: Machine-readable error returned before a saga can be started.
+      additionalProperties: false
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          description: Stable error identifier such as validation_error or an idempotency conflict code.
+          minLength: 1
+        message:
+          type: string
+          description: Human-readable explanation of the rejected request.
+          minLength: 1
